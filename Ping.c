@@ -29,27 +29,51 @@ int main(int ac, char **av)
     struct in_addr **addr_list;
     hostinfo = gethostbyname(av[1]); 
     addr_list = (struct in_addr **)hostinfo->h_addr_list;
-    printf("IP address: %s\n", inet_ntoa(*addr_list[0]));
+    printf("PING %s (%s) 56(84) bytes of data.\n", av[1], inet_ntoa(*addr_list[0]));
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
     dest.sin_family = AF_INET;
     dest.sin_addr = *addr_list[0];
-    // creer le socket pour le protocole ICMP
-    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
-    if (sock == -1)
-        return(write(1, "Error socket\n", 13)); 
+    int i = 1;
+    while(1)
+    {
+        // creer le socket pour le protocole ICMP
+        int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+        if (sock == -1)
+            return(write(1, "Error socket\n", 13)); 
 
-    // creer le paquet icmp pour lenvoie du socket     
-    struct icmphdr *icmp_hdr = malloc(sizeof(struct icmphdr));
-    memset(icmp_hdr, 0, sizeof(struct icmp_hdr));
-    icmp_hdr->type = ICMP_ECHO; // 8
-    icmp_hdr->code = 0;
-    icmp_hdr->un.echo.id = getpid() & 0xFFFF;
-    icmp_hdr->un.echo.sequence = 1;
-    icmp_hdr->checksum = checksum(icmp_hdr, sizeof(struct icmphdr));
+        // creer le paquet icmp pour lenvoie du socket     
+        struct icmphdr *icmp_hdr = malloc(sizeof(struct icmphdr));
+        memset(icmp_hdr, 0, sizeof(struct icmp_hdr *));
+        icmp_hdr->type = ICMP_ECHO; // 8
+        icmp_hdr->code = 0;
+        icmp_hdr->un.echo.id = getpid() & 0xFFFF;
+        icmp_hdr->un.echo.sequence = i;
+        icmp_hdr->checksum = checksum(icmp_hdr, sizeof(struct icmphdr));
 
-    // envoie de ICMPECHO 
-    if (sendto(sock, icmp_hdr, sizeof(struct icmphdr), 0, (struct sockaddr *)&dest, sizeof(dest)) < 0)
-        return(write(1, "Error socket 2 \n", 15));
-    close 
+        // envoie de ICMPECHO 
+        if (sendto(sock, icmp_hdr, sizeof(struct icmphdr), 0, (struct sockaddr *)&dest, sizeof(dest)) < 0)
+            return(write(1, "Error socket 2 \n", 15));
+
+        //reception de ICMP Echo Reply
+        struct sockaddr_in r_addr;
+        char buffer[1024];
+        socklen_t addr_len = sizeof(r_addr);
+        struct icmphdr *icmp_hdr1 = malloc(sizeof(struct icmphdr));
+        int n;
+        if ((n = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr *)&r_addr, &addr_len)) < 0)
+            return(write(1, "Error socket 3 \n", 15));
+            struct iphdr *ip_hdr = (struct iphdr *)buffer;
+            int ip_header_len = ip_hdr->ihl * 4;
+            memcpy(icmp_hdr1, buffer + ip_header_len, sizeof(struct icmphdr));
+        printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms\n",
+               n, inet_ntoa(r_addr.sin_addr), icmp_hdr1->un.echo.sequence,
+               ip_hdr->ttl, (double)(i * 1000) );
+        free(icmp_hdr);
+        free(icmp_hdr1);
+        close(sock);
+        sleep(1);
+        i++;
+    }
+    return (0);
 }
