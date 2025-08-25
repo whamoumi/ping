@@ -2,8 +2,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <unistd.h> /* close */
-#include <netdb.h> /* gethostbyname */
+#include <unistd.h> 
+#include <netdb.h> 
 #include <stdio.h>
 #include <netinet/ip_icmp.h>
 #include <string.h>
@@ -22,10 +22,11 @@ struct info {
     double rtt_max;
     double rtt_sum;
     double rtt_total;
+    double time;
 
 };
 
-struct info ping_info = {1, 0, 0.0, 0.0, 0.0, NULL, 0.0, 0.0, 0.0, 0.0};
+struct info ping_info = {1, 0, 0.0, 0.0, 0.0, NULL, 0.0, 0.0, 0.0, 0.0, 0.0};
 
 uint16_t checksum(void *b, int len) {
     uint16_t *buf = b;
@@ -52,10 +53,13 @@ double my_sqrt(double x)
 
 void sig_int(int sig)
 {
+    struct timeval end_time;
+    gettimeofday(&end_time, NULL);
     printf("\n--- %s ping statistics ---\n", ping_info.hostname);
-    printf("%d packets transmitted, %d received, %.1f%% packet loss\n",
+    printf("%d packets transmitted, %d received, %.1f%% packet loss, time %.1f ms\n",
            ping_info.sent, ping_info.received,
-           (ping_info.sent - ping_info.received) * 100.0 / ping_info.sent);
+           (ping_info.sent - ping_info.received) * 100.0 / ping_info.sent,
+           (end_time.tv_sec * 1000.0 + end_time.tv_usec / 1000.0) - ping_info.time);
     if (ping_info.received > 0) {
         // a revoir 
         printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n",
@@ -70,30 +74,46 @@ void sig_int(int sig)
 int main(int ac, char **av)
 {
     int verbose = 0;
+    int id = getpid() & 0xFFFF;
     if (ac < 2 || ac > 3)
         return(write(1, "Error\n", 6));
-    if (strcmp(av[1], "-v" == 0 && ac == 3)
+    if (strcmp(av[1], "-v") == 0 && ac == 3)
         verbose = 1;
-    if (strcmp(av[1], "-v" != 0 && ac == 3)
+    if ((strcmp(av[1], "-v") != 0) && ac == 3)
         return(printf("Give the right options\n"));
     struct in_addr **addr_list;
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
     dest.sin_family = AF_INET;
-    if (inet_aton(av[1], &dest.sin_addr) == 0)
+    if (ac == 3 && strcmp(av[1], "-v") == 0)
+        dest.sin_addr.s_addr = inet_addr(av[2]);
+    if (inet_aton(av[1], &dest.sin_addr) == 0 && ac == 2)
         return(write(1, "Give a valid IP address\n", 24));
-    ping_info.hostname = av[1];
+    if (ac == 3)
+        ping_info.hostname = av[2];
+    else
+        ping_info.hostname = av[1];   
+    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);     
+    if (sock == -1)
+            return(write(1, "Error socket\n", 13));
     if (verbose == 1)
-        printf("Ecrire tous les informations que l'on as avec verbose\n");
-    printf("PING %s 56(84) bytes of data.\n", av[1]);
+    {
+        printf("ping: sock4.fd:%d (socktype:SOCK_RAW), hints.ai_family: AF_UNSPEC\n", sock);
+        printf("\n");
+        printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", ping_info.hostname);
+    }
+    printf("PING %s 56(84) bytes of data.\n", ping_info.hostname);
+    close(sock);
+    struct timeval start_time;
+    gettimeofday(&start_time, NULL);
+    ping_info.time = start_time.tv_sec * 1000.0 + start_time.tv_usec / 1000.0;
     while(1)
     {
-        struct timeval start, end;
-        // creer le socket pour le protocole ICMP
-        int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+        sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
         if (sock == -1)
-            return(write(1, "Error socket\n", 13)); 
+            return(write(1, "Error socket\n", 13));
         struct timeval timeout;
+        struct timeval start, end;
         timeout.tv_sec = 1;
         timeout.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
@@ -102,7 +122,7 @@ int main(int ac, char **av)
         memset(icmp_hdr, 0, sizeof(struct icmphdr));
         icmp_hdr->type = ICMP_ECHO; // 8
         icmp_hdr->code = 0;
-        icmp_hdr->un.echo.id = getpid() & 0xFFFF;
+        icmp_hdr->un.echo.id = id;
         icmp_hdr->un.echo.sequence = ping_info.sent;
         icmp_hdr->checksum = checksum(icmp_hdr, sizeof(struct icmphdr));
         
@@ -135,11 +155,16 @@ int main(int ac, char **av)
                     ping_info.rtt_max = rtt;
                 ping_info.rtt_sum += rtt;
                 ping_info.rtt_total += 1;
-        
-                printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",
-                       n, inet_ntoa(r_addr.sin_addr),
-                       icmp_hdr1->un.echo.sequence,
-                       ip_hdr->ttl, rtt);
+                if (verbose == 0)
+                    printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",
+                        n, inet_ntoa(r_addr.sin_addr),
+                        icmp_hdr1->un.echo.sequence,
+                        ip_hdr->ttl, rtt);
+                else
+                    printf("%d bytes from %s: icmp_seq=%d ident=%d ttl=%d time=%.2f ms\n",
+                        n, inet_ntoa(r_addr.sin_addr),
+                        icmp_hdr1->un.echo.sequence,
+                        id, ip_hdr->ttl, rtt);
                 ping_info.received++;
             }
             else if (icmp_hdr1->type == ICMP_DEST_UNREACH  && verbose == 1) {
