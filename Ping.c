@@ -69,8 +69,13 @@ void sig_int(int sig)
 
 int main(int ac, char **av)
 {
+    int verbose = 0;
     if (ac < 2 || ac > 3)
         return(write(1, "Error\n", 6));
+    if (strcmp(av[1], "-v" == 0 && ac == 3)
+        verbose = 1;
+    if (strcmp(av[1], "-v" != 0 && ac == 3)
+        return(printf("Give the right options\n"));
     struct in_addr **addr_list;
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
@@ -78,6 +83,8 @@ int main(int ac, char **av)
     if (inet_aton(av[1], &dest.sin_addr) == 0)
         return(write(1, "Give a valid IP address\n", 24));
     ping_info.hostname = av[1];
+    if (verbose == 1)
+        printf("Ecrire tous les informations que l'on as avec verbose\n");
     printf("PING %s 56(84) bytes of data.\n", av[1]);
     while(1)
     {
@@ -116,18 +123,41 @@ int main(int ac, char **av)
         int ip_header_len = ip_hdr->ihl * 4;
         memcpy(icmp_hdr1, buffer + ip_header_len, sizeof(struct icmphdr));
         if (n > 0) {
-            gettimeofday(&end, NULL);
-            double rtt = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
-            if (ping_info.rtt_min == 0.0 || ping_info.rtt_min > rtt) {
-                ping_info.rtt_min = rtt;
+            if (icmp_hdr1->type == ICMP_ECHOREPLY) {
+                // calcul RTT comme avant
+                gettimeofday(&end, NULL);
+                double rtt = (end.tv_sec - start.tv_sec) * 1000.0 +
+                             (end.tv_usec - start.tv_usec) / 1000.0;
+        
+                if (ping_info.rtt_min == 0.0 || ping_info.rtt_min > rtt)
+                    ping_info.rtt_min = rtt;
+                if (ping_info.rtt_max < rtt)
+                    ping_info.rtt_max = rtt;
+                ping_info.rtt_sum += rtt;
+                ping_info.rtt_total += 1;
+        
+                printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",
+                       n, inet_ntoa(r_addr.sin_addr),
+                       icmp_hdr1->un.echo.sequence,
+                       ip_hdr->ttl, rtt);
+                ping_info.received++;
             }
-            if (ping_info.rtt_max < rtt) {
-                ping_info.rtt_max = rtt;
+            else if (icmp_hdr1->type == ICMP_DEST_UNREACH  && verbose == 1) {
+                printf("From %s icmp_seq=%d Destination Unreachable (code=%d)\n",
+                       inet_ntoa(r_addr.sin_addr), ping_info.sent, icmp_hdr1->code);
             }
-            ping_info.rtt_sum += rtt;
-            ping_info.rtt_total += 1;
-            printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",n, inet_ntoa(r_addr.sin_addr), icmp_hdr1->un.echo.sequence,ip_hdr->ttl, rtt);
-            ping_info.received++;
+            else if (icmp_hdr1->type == ICMP_TIME_EXCEEDED && verbose == 1) {
+                printf("From %s icmp_seq=%d Time to live exceeded\n",
+                       inet_ntoa(r_addr.sin_addr), ping_info.sent);
+            }
+            else if (icmp_hdr1->type == ICMP_REDIRECT  && verbose == 1) {
+                printf("From %s icmp_seq=%d Redirect (code=%d)\n",
+                       inet_ntoa(r_addr.sin_addr), ping_info.sent, icmp_hdr1->code);
+            }
+            else {
+                printf("From %s: ICMP type=%d code=%d (non géré)\n",
+                       inet_ntoa(r_addr.sin_addr), icmp_hdr1->type, icmp_hdr1->code);
+            }
         }
         signal(SIGINT, &sig_int);
         free(icmp_hdr);
