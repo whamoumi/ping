@@ -1,6 +1,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>  // Pour struct iphdr
 #include <arpa/inet.h>
 #include <unistd.h> 
 #include <netdb.h> 
@@ -21,9 +22,8 @@ struct info {
     double rtt_min;
     double rtt_max;
     double rtt_sum;
-    double rtt_total;
+    double rtt_sum_sq;  // Somme des carrés pour calculer la déviation
     double time;
-
 };
 
 struct info ping_info = {1, 0, 0.0, 0.0, 0.0, NULL, 0.0, 0.0, 0.0, 0.0, 0.0};
@@ -58,15 +58,18 @@ void sig_int(int sig)
     printf("\n--- %s ping statistics ---\n", ping_info.hostname);
     printf("%d packets transmitted, %d received, %.1f%% packet loss, time %.1f ms\n",
            ping_info.sent, ping_info.received,
-           (ping_info.sent - ping_info.received) * 100.0 / ping_info.sent,
+           ping_info.sent > 0 ? (ping_info.sent - ping_info.received) * 100.0 / ping_info.sent : 0.0,
            (end_time.tv_sec * 1000.0 + end_time.tv_usec / 1000.0) - ping_info.time);
     if (ping_info.received > 0) {
-        // a revoir 
+        double avg = ping_info.rtt_sum / ping_info.received;
+        double variance = (ping_info.rtt_sum_sq / ping_info.received) - (avg * avg);
+        double mdev = variance > 0 ? my_sqrt(variance) : 0.0;
+        
         printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n",
                 ping_info.rtt_min,
-                ping_info.rtt_sum / ping_info.received,
+                avg,
                 ping_info.rtt_max,
-                my_sqrt(ping_info.rtt_sum / ping_info.received - ping_info.rtt_min));
+                mdev);
     }
     exit(0);
 }
@@ -75,6 +78,14 @@ int main(int ac, char **av)
 {
     int verbose = 0;
     int id = getpid() & 0xFFFF;
+    
+    // Vérifier les privilèges root pour les sockets RAW
+    if (getuid() != 0) {
+        printf("ping: socket: Operation not permitted\n");
+        printf("(Try running as root with sudo)\n");
+        return 1;
+    }
+    
     if (ac < 2 || ac > 3)
         return(write(1, "Error\n", 6));
     if (strcmp(av[1], "-v") == 0 && ac == 3)
@@ -83,12 +94,36 @@ int main(int ac, char **av)
         return(printf("Give the right options\n"));
     struct in_addr **addr_list;
     struct sockaddr_in dest;
+    struct hostent *host;
+    if (ac == 2)
+    {
+        host = gethostbyname(av[1]);
+        if (host == NULL)
+            return(write(1, "Error gethostbyname\n", 21));
+        addr_list = (struct in_addr **)host->h_addr_list;
+        if (addr_list[0] == NULL)
+            return(write(1, "Error addr_list\n", 17));
+        if (verbose == 1)
+            printf("ping: sock4.fd:-1 (socktype:SOCK_RAW), hints.ai_family: AF_UNSPEC\n\n");
+        if (verbose == 1)
+            printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", av[1]);
+        if (verbose == 1)
+            printf("Resolved %s to %s\n", av[1], inet_ntoa(*addr_list[0]));
+    }
+    else if (ac == 3 && strcmp(av[1], "-v") == 0)
+    {
+        host = gethostbyname(av[2]);
+        if (host == NULL)
+            return(write(1, "Error gethostbyname\n", 21));
+        addr_list = (struct in_addr **)host->h_addr_list;
+        if (addr_list[0] == NULL)
+            return(write(1, "Error addr_list\n", 17));
+        if (verbose == 1)
+            printf("Resolved %s to %s\n", av[2], inet_ntoa(*addr_list[0]));
+    }
     memset(&dest, 0, sizeof(dest));
     dest.sin_family = AF_INET;
-    if (ac == 3 && strcmp(av[1], "-v") == 0)
-        dest.sin_addr.s_addr = inet_addr(av[2]);
-    if (inet_aton(av[1], &dest.sin_addr) == 0 && ac == 2)
-        return(write(1, "Give a valid IP address\n", 24));
+    dest.sin_addr = *addr_list[0];
     if (ac == 3)
         ping_info.hostname = av[2];
     else
@@ -102,11 +137,15 @@ int main(int ac, char **av)
         printf("\n");
         printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", ping_info.hostname);
     }
-    printf("PING %s 56(84) bytes of data.\n", ping_info.hostname);
+    printf("PING %s (%s) 56(84) bytes of data.\n", ping_info.hostname, inet_ntoa(*addr_list[0]));
     close(sock);
     struct timeval start_time;
     gettimeofday(&start_time, NULL);
     ping_info.time = start_time.tv_sec * 1000.0 + start_time.tv_usec / 1000.0;
+    
+    // Installer le gestionnaire de signal une seule fois
+    signal(SIGINT, &sig_int);
+    
     while(1)
     {
         sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
@@ -124,6 +163,7 @@ int main(int ac, char **av)
         icmp_hdr->code = 0;
         icmp_hdr->un.echo.id = id;
         icmp_hdr->un.echo.sequence = ping_info.sent;
+        icmp_hdr->checksum = 0;  // Mettre à 0 avant calcul
         icmp_hdr->checksum = checksum(icmp_hdr, sizeof(struct icmphdr));
         
         // envoie de ICMPECHO 
@@ -154,7 +194,7 @@ int main(int ac, char **av)
                 if (ping_info.rtt_max < rtt)
                     ping_info.rtt_max = rtt;
                 ping_info.rtt_sum += rtt;
-                ping_info.rtt_total += 1;
+                ping_info.rtt_sum_sq += rtt * rtt;  // Ajouter le carré pour le calcul de déviation
                 if (verbose == 0)
                     printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",
                         n, inet_ntoa(r_addr.sin_addr),
@@ -184,7 +224,6 @@ int main(int ac, char **av)
                        inet_ntoa(r_addr.sin_addr), icmp_hdr1->type, icmp_hdr1->code);
             }
         }
-        signal(SIGINT, &sig_int);
         free(icmp_hdr);
         free(icmp_hdr1);
         close(sock);
