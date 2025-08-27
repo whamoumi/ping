@@ -1,35 +1,10 @@
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/ip.h>  // Pour struct iphdr
-#include <arpa/inet.h>
-#include <unistd.h> 
-#include <netdb.h> 
-#include <stdio.h>
-#include <netinet/ip_icmp.h>
-#include <string.h>
-#include <stdlib.h>
-#include <signal.h>
-#include <sys/time.h>
-
-struct info {
-    int sent;
-    int received;
-    double min;
-    double max;
-    double total;
-    char *hostname;
-    double rtt_min;
-    double rtt_max;
-    double rtt_sum;
-    double rtt_sum_sq;  // Somme des carrés pour calculer la déviation
-    double time;
-};
+#include "ft_ping.h"
 
 struct info ping_info = {1, 0, 0.0, 0.0, 0.0, NULL, 0.0, 0.0, 0.0, 0.0, 0.0};
 
-uint16_t checksum(void *b, int len) {
-    uint16_t *buf = b;
+unsigned int checksum(void *b, int len) 
+{
+    unsigned int *buf = b;
     unsigned int sum = 0;
     for (; len > 1; len -= 2)
         sum += *buf++;
@@ -54,6 +29,7 @@ double my_sqrt(double x)
 void sig_int(int sig)
 {
     struct timeval end_time;
+    (void)sig;
     gettimeofday(&end_time, NULL);
     printf("\n--- %s ping statistics ---\n", ping_info.hostname);
     printf("%d packets transmitted, %d received, %.1f%% packet loss, time %.1f ms\n",
