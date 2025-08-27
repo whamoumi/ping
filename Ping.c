@@ -45,7 +45,7 @@ double my_sqrt(double x)
     if (x <= 0)
         return 0;
     double guess = x / 2.0;
-    for (int i = 0; i < 10; i++) {  // 10 itérations suffisent pour une bonne précision
+    for (int i = 0; i < 10; i++) { 
         guess = (guess + x / guess) / 2.0;
     }
     return guess;
@@ -79,7 +79,6 @@ int main(int ac, char **av)
     int verbose = 0;
     int id = getpid() & 0xFFFF;
     
-    // Vérifier les privilèges root pour les sockets RAW
     if (getuid() != 0) {
         printf("ping: socket: Operation not permitted\n");
         printf("(Try running as root with sudo)\n");
@@ -88,18 +87,29 @@ int main(int ac, char **av)
     
     if (ac < 2 || ac > 3)
         return(write(1, "Error\n", 6));
+    if (ac == 2 && strcmp(av[1], "-h") == 0)
+        return(printf("Usage\n\tping [options] <destination>\nOptions:\n\t<destination>       DNS name or IP4 address\n\t-v      Verbose output\n\t-h      Display this help message\n"));
     if (strcmp(av[1], "-v") == 0 && ac == 3)
         verbose = 1;
     if ((strcmp(av[1], "-v") != 0) && ac == 3)
-        return(printf("Give the right options\n"));
+        return(printf("Give the right options\n"));    
+    if (ac == 3)
+        ping_info.hostname = av[2];
+    else
+        ping_info.hostname = av[1]; 
     struct in_addr **addr_list;
     struct sockaddr_in dest;
     struct hostent *host;
+    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);     
+    if (sock == -1)
+            return(write(1, "Error socket\n", 13));   
+    if (verbose == 1)
+        printf("ping: sock4.fd: %d (socktype:SOCK_RAW), hints.ai_family: AF_UNSPEC\n\n", sock);
     if (ac == 2)
     {
         host = gethostbyname(av[1]);
         if (host == NULL)
-            return(write(1, "Error gethostbyname\n", 21));
+            return(printf("ping: %s: Name or service not known\n", av[1]));
         addr_list = (struct in_addr **)host->h_addr_list;
         if (addr_list[0] == NULL)
             return(write(1, "Error addr_list\n", 17));
@@ -114,7 +124,7 @@ int main(int ac, char **av)
     {
         host = gethostbyname(av[2]);
         if (host == NULL)
-            return(write(1, "Error gethostbyname\n", 21));
+            return(printf("ping: %s: Name or service not known\n", av[2]));
         addr_list = (struct in_addr **)host->h_addr_list;
         if (addr_list[0] == NULL)
             return(write(1, "Error addr_list\n", 17));
@@ -124,28 +134,14 @@ int main(int ac, char **av)
     memset(&dest, 0, sizeof(dest));
     dest.sin_family = AF_INET;
     dest.sin_addr = *addr_list[0];
-    if (ac == 3)
-        ping_info.hostname = av[2];
-    else
-        ping_info.hostname = av[1];   
-    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);     
-    if (sock == -1)
-            return(write(1, "Error socket\n", 13));
     if (verbose == 1)
-    {
-        printf("ping: sock4.fd:%d (socktype:SOCK_RAW), hints.ai_family: AF_UNSPEC\n", sock);
-        printf("\n");
         printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", ping_info.hostname);
-    }
     printf("PING %s (%s) 56(84) bytes of data.\n", ping_info.hostname, inet_ntoa(*addr_list[0]));
     close(sock);
     struct timeval start_time;
     gettimeofday(&start_time, NULL);
     ping_info.time = start_time.tv_sec * 1000.0 + start_time.tv_usec / 1000.0;
-    
-    // Installer le gestionnaire de signal une seule fois
     signal(SIGINT, &sig_int);
-    
     while(1)
     {
         sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
@@ -155,8 +151,7 @@ int main(int ac, char **av)
         struct timeval start, end;
         timeout.tv_sec = 1;
         timeout.tv_usec = 0;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-        // creer le paquet icmp pour lenvoie du socket     
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));    
         struct icmphdr *icmp_hdr = malloc(sizeof(struct icmphdr));
         memset(icmp_hdr, 0, sizeof(struct icmphdr));
         icmp_hdr->type = ICMP_ECHO; // 8
@@ -165,26 +160,20 @@ int main(int ac, char **av)
         icmp_hdr->un.echo.sequence = ping_info.sent;
         icmp_hdr->checksum = 0;  // Mettre à 0 avant calcul
         icmp_hdr->checksum = checksum(icmp_hdr, sizeof(struct icmphdr));
-        
-        // envoie de ICMPECHO 
         gettimeofday(&start, NULL);
         if (sendto(sock, icmp_hdr, sizeof(struct icmphdr), 0, (struct sockaddr *)&dest, sizeof(dest)) < 0)
             return(write(1, "Error socket 2 \n", 15));
-        
-        //reception de ICMP Echo Reply
         struct sockaddr_in r_addr;
         char buffer[1024];
         socklen_t addr_len = sizeof(r_addr);
         struct icmphdr *icmp_hdr1 = malloc(sizeof(struct icmphdr));
         int n;
         n = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr *)&r_addr, &addr_len);
-        
         struct iphdr *ip_hdr = (struct iphdr *)buffer;
         int ip_header_len = ip_hdr->ihl * 4;
         memcpy(icmp_hdr1, buffer + ip_header_len, sizeof(struct icmphdr));
         if (n > 0) {
             if (icmp_hdr1->type == ICMP_ECHOREPLY) {
-                // calcul RTT comme avant
                 gettimeofday(&end, NULL);
                 double rtt = (end.tv_sec - start.tv_sec) * 1000.0 +
                              (end.tv_usec - start.tv_usec) / 1000.0;
@@ -194,7 +183,7 @@ int main(int ac, char **av)
                 if (ping_info.rtt_max < rtt)
                     ping_info.rtt_max = rtt;
                 ping_info.rtt_sum += rtt;
-                ping_info.rtt_sum_sq += rtt * rtt;  // Ajouter le carré pour le calcul de déviation
+                ping_info.rtt_sum_sq += rtt * rtt;
                 if (verbose == 0)
                     printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",
                         n, inet_ntoa(r_addr.sin_addr),
